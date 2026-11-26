@@ -10,16 +10,51 @@ import {
   type FaceMeasurements,
 } from "@/lib/face-geometry";
 import Glasses3D, { type FacePose } from "@/app/components/Glasses3D";
+import GlbProductPreview from "@/app/components/GlbProductPreview";
+import type { ScanScaleProfiles } from "@/lib/glasses-calibration";
 
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.2.3/wasm";
-const DEFAULT_MODEL_URL = "/frames/starter-wayfarer-glasses.glb";
 const FRAMES = [
-  { name: "Forma Classic", style: "Polished black acetate · Optical", price: "$245", shape: "Square", color: "#211f1c", mark: "FC", image: "/frames/black-frame.png" },
-  { name: "The Riviera", style: "Polished titanium · Gold", price: "$310", shape: "Round", color: "#c7a35b", mark: "RI" },
-  { name: "The Form", style: "Italian acetate · Tortoise", price: "$280", shape: "Square", color: "#77553b", mark: "FO" },
-  { name: "The Solstice", style: "Featherweight metal · Silver", price: "$265", shape: "Oval", color: "#b9bdba", mark: "SO" },
+  { name: "Classic Aviator", style: "Metal frame · blue smoke lenses", shape: "Aviator", color: "#b08b4d", modelUrl: "/frames/classic_aviator.glb" },
+  { name: "Classic Wayfarer", style: "Dark acetate · smoke lenses", shape: "Wayfarer", color: "#252525", modelUrl: "/frames/classic_wayfarer.glb" },
+  { name: "Everest Glacier", style: "Full coverage · glacier lens", shape: "Shield", color: "#384d60", modelUrl: "/frames/everest_glacier.glb" },
+  { name: "Sunglasses Try-On", style: "Sport frame · blue tint", shape: "Sport", color: "#394958", modelUrl: "/frames/sunglasses_tryon.glb" },
+  { name: "Glasses 1", style: "3D eyewear · GLB model", shape: "Frame", color: "#514a40", modelUrl: "/frames/glasses-1-.glb" },
+  { name: "Glasses 5B", style: "3D eyewear · GLB model", shape: "Frame", color: "#8b7554", modelUrl: "/frames/glasses-5b.glb" },
+  { name: "Glasses 5C", style: "3D eyewear · GLB model", shape: "Frame", color: "#544c48", modelUrl: "/frames/glasses-5c.glb" },
+  { name: "Glasses 6", style: "3D eyewear · GLB model", shape: "Frame", color: "#a6843f", modelUrl: "/frames/glasses-6.glb" },
+  { name: "Glasses 7", style: "3D eyewear · GLB model", shape: "Frame", color: "#9d4f67", modelUrl: "/frames/glasses-7.glb" },
+  { name: "Glasses 7B", style: "3D eyewear · GLB model", shape: "Frame", color: "#253b58", modelUrl: "/frames/glasses-7b.glb" },
+  { name: "Glasses 7C", style: "3D eyewear · GLB model", shape: "Frame", color: "#253b58", modelUrl: "/frames/glasses-7c.glb" },
+  { name: "Glasses 8B", style: "3D eyewear · GLB model", shape: "Frame", color: "#9d8149", modelUrl: "/frames/glasses-8b.glb" },
+  { name: "Glasses 8C", style: "3D eyewear · GLB model", shape: "Frame", color: "#9d8149", modelUrl: "/frames/glasses-8c.glb" },
+  { name: "Glasses 9B", style: "3D eyewear · GLB model", shape: "Frame", color: "#574d42", modelUrl: "/frames/glasses-9b.glb" },
+  { name: "Glasses 9C", style: "3D eyewear · GLB model", shape: "Frame", color: "#574d42", modelUrl: "/frames/glasses-9c.glb" },
+  { name: "Glasses 10", style: "3D eyewear · GLB model", shape: "Frame", color: "#514a40", modelUrl: "/frames/glasses-10.glb" },
+  { name: "Glasses 11B", style: "3D eyewear · GLB model", shape: "Frame", color: "#345e91", modelUrl: "/frames/glasses-11b.glb" },
+  { name: "Glasses 11C", style: "3D eyewear · GLB model", shape: "Frame", color: "#345e91", modelUrl: "/frames/glasses-11c.glb" },
+  { name: "Glasses 12", style: "3D eyewear · GLB model", shape: "Frame", color: "#9f3333", modelUrl: "/frames/glasses-12.glb" },
 ];
+const DEFAULT_MODEL_URL = FRAMES[0].modelUrl;
+
+type ScanStep = "front" | "left" | "right" | "complete";
+type ScanCapture = {
+  yaw: number;
+  eyeDistance: number;
+  depth: number;
+  landmarks: Float32Array;
+  capturedAt: number;
+};
+type ScanCaptures = Partial<Record<Exclude<ScanStep, "complete">, ScanCapture>>;
+
+const SCAN_STEPS: Exclude<ScanStep, "complete">[] = ["front", "left", "right"];
+const SCAN_COPY: Record<ScanStep, { title: string; instruction: string }> = {
+  front: { title: "Front profile", instruction: "Keep this distance from the camera, look straight ahead, and hold still." },
+  left: { title: "Left profile", instruction: "Keep your position; turn left about 35–60° and hold still." },
+  right: { title: "Right profile", instruction: "Keep your position; turn right about 35–60° and hold still." },
+  complete: { title: "3 view scan complete", instruction: "Your front and side profiles are ready for fitting." },
+};
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -33,16 +68,26 @@ export default function Home() {
   const smoothedRef = useRef<Float32Array | null>(null);
   const poseRef = useRef<FacePose>(null);
   const faceMeshIndicesRef = useRef<Uint16Array | null>(null);
+  const scanStepRef = useRef<ScanStep>("front");
+  const scanHoldRef = useRef<{ start: number; yaw: number; eyeDistance: number } | null>(null);
+  const scanCapturesRef = useRef<ScanCaptures>({});
+  const lastScanProgressUpdateRef = useRef(0);
+  const audioGuidanceRef = useRef(true);
+  const scanAudioContextRef = useRef<AudioContext | null>(null);
+  const scanCueTimerRef = useRef<number | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [starting, setStarting] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
+  const [scanStep, setScanStep] = useState<ScanStep>("front");
+  const [scanProgress, setScanProgress] = useState(0);
+  const [scanCaptures, setScanCaptures] = useState<ScanCaptures>({});
+  const [audioGuidance, setAudioGuidance] = useState(true);
   const [landmarkCount, setLandmarkCount] = useState(0);
   const [status, setStatus] = useState("Ready when you are");
   const [mode, setMode] = useState<"GPU" | "CPU" | null>(null);
   const [measurements, setMeasurements] = useState<FaceMeasurements | null>(null);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState(0);
-  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
   const [showUploadControls, setShowUploadControls] = useState(false);
   const [scale, setScale] = useState(1);
   const [offsetY, setOffsetY] = useState(0);
@@ -52,9 +97,150 @@ export default function Home() {
   const [captured, setCaptured] = useState<string | null>(null);
   const [showAnalysis, setShowAnalysis] = useState(false);
   const [modelUrl, setModelUrl] = useState(DEFAULT_MODEL_URL);
-  const [modelStatus, setModelStatus] = useState("Loading included 3D frame…");
-  const fileRef = useRef<HTMLInputElement>(null);
+  const [modelStatus, setModelStatus] = useState("Loading GLB frame model…");
   const modelFileRef = useRef<HTMLInputElement>(null);
+
+  function prepareScanAudio() {
+    if (!audioGuidanceRef.current || typeof window === "undefined") return;
+    try {
+      const AudioContextConstructor = window.AudioContext;
+      if (!AudioContextConstructor) return;
+      if (!scanAudioContextRef.current) scanAudioContextRef.current = new AudioContextConstructor();
+      if (scanAudioContextRef.current.state === "suspended") {
+        void scanAudioContextRef.current.resume().catch(() => undefined);
+      }
+    } catch {
+      // Spoken prompts can still work when the browser does not allow Web Audio.
+    }
+  }
+
+  function announceScanStep(step: ScanStep) {
+    if (!audioGuidanceRef.current || typeof window === "undefined") return;
+    const announcement = step === "front"
+      ? "Scan starting. Face the camera, look straight ahead, and hold still until you hear the tone."
+      : step === "left"
+        ? "Front view saved. Turn your head to your left about 45 degrees. Keep your shoulders still and hold until the tone."
+        : step === "right"
+          ? "Left view saved. Now turn your head to your right about 45 degrees. Keep your shoulders still and hold until the tone."
+          : "Right view saved. Your three view scan is complete. You can now choose your glasses.";
+
+    if (scanCueTimerRef.current !== null) window.clearTimeout(scanCueTimerRef.current);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    const context = scanAudioContextRef.current;
+    if (context?.state === "running") {
+      try {
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        const now = context.currentTime;
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(step === "complete" ? 660 : 880, now);
+        oscillator.frequency.setValueAtTime(step === "complete" ? 880 : 1174, now + 0.11);
+        gain.gain.setValueAtTime(0.0001, now);
+        gain.gain.exponentialRampToValueAtTime(0.16, now + 0.015);
+        gain.gain.setValueAtTime(0.12, now + 0.12);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.23);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(now);
+        oscillator.stop(now + 0.24);
+      } catch {
+        // Continue with voice guidance if a browser cannot play the confirmation tone.
+      }
+    }
+    if (!("speechSynthesis" in window) || typeof SpeechSynthesisUtterance === "undefined") return;
+    scanCueTimerRef.current = window.setTimeout(() => {
+      scanCueTimerRef.current = null;
+      if (!audioGuidanceRef.current) return;
+      const utterance = new SpeechSynthesisUtterance(announcement);
+      utterance.rate = 0.95;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+      window.speechSynthesis.speak(utterance);
+    }, 260);
+  }
+
+  function toggleAudioGuidance() {
+    const enabled = !audioGuidanceRef.current;
+    audioGuidanceRef.current = enabled;
+    setAudioGuidance(enabled);
+    if (enabled) {
+      prepareScanAudio();
+      if (cameraActive) announceScanStep(scanStepRef.current);
+    } else {
+      if (scanCueTimerRef.current !== null) window.clearTimeout(scanCueTimerRef.current);
+      scanCueTimerRef.current = null;
+      if (typeof window !== "undefined" && "speechSynthesis" in window) window.speechSynthesis.cancel();
+    }
+  }
+
+  function recordScanProgress(frameTime: number, pose: FacePose, landmarks: Float32Array) {
+    if (!pose || scanStepRef.current === "complete") return;
+    const step = scanStepRef.current;
+    const yaw = pose.yaw;
+    const pitchAndRollAreLevel = Math.abs(pose.pitch) < 20 && Math.abs(pose.roll) < 20;
+    const confident = pose.confidence >= 0.45;
+    const inTargetPose = step === "front"
+      ? Math.abs(yaw) <= 12
+      : step === "left"
+        ? yaw >= 28 && yaw <= 68
+        : yaw <= -28 && yaw >= -68;
+    if (!inTargetPose || !pitchAndRollAreLevel || !confident) {
+      scanHoldRef.current = null;
+      if (frameTime - lastScanProgressUpdateRef.current > 100) {
+        lastScanProgressUpdateRef.current = frameTime;
+        setScanProgress(0);
+      }
+      return;
+    }
+
+    let hold = scanHoldRef.current;
+    if (hold && (Math.abs(yaw - hold.yaw) > 5 || Math.abs(pose.eyeDistance / hold.eyeDistance - 1) > 0.09)) {
+      hold = null;
+      scanHoldRef.current = null;
+    }
+    if (!hold) {
+      hold = { start: frameTime, yaw, eyeDistance: pose.eyeDistance };
+      scanHoldRef.current = hold;
+    }
+    const progress = Math.min(100, ((frameTime - hold.start) / 1000) * 100);
+    if (frameTime - lastScanProgressUpdateRef.current > 90) {
+      lastScanProgressUpdateRef.current = frameTime;
+      setScanProgress(progress);
+    }
+    if (progress < 100) return;
+
+    const capture: ScanCapture = {
+      yaw,
+      eyeDistance: pose.eyeDistance,
+      depth: pose.depth,
+      landmarks: new Float32Array(landmarks),
+      capturedAt: Date.now(),
+    };
+    scanCapturesRef.current = { ...scanCapturesRef.current, [step]: capture };
+    setScanCaptures(scanCapturesRef.current);
+    const nextStep = step === "front" ? "left" : step === "left" ? "right" : "complete";
+    scanStepRef.current = nextStep;
+    scanHoldRef.current = null;
+    setScanProgress(0);
+    setScanStep(nextStep);
+    setStatus(nextStep === "complete"
+      ? "3 view scan complete"
+      : nextStep === "left"
+        ? "Front saved · turn your head left"
+        : "Left saved · turn your head right");
+    announceScanStep(nextStep);
+  }
+
+  function restartScan() {
+    scanStepRef.current = "front";
+    scanHoldRef.current = null;
+    scanCapturesRef.current = {};
+    setScanCaptures({});
+    setScanStep("front");
+    setScanProgress(0);
+    setStatus(cameraActive ? "Scan started · look straight ahead" : "Ready to scan your face");
+    if (cameraActive) announceScanStep("front");
+  }
 
   function releaseCameraResources() {
     if (animationRef.current !== null) cancelAnimationFrame(animationRef.current);
@@ -71,6 +257,7 @@ export default function Home() {
 
   async function startCamera() {
     if (startingRef.current || cameraActive) return;
+    prepareScanAudio();
     startingRef.current = true; setStarting(true); setError(""); setStatus("Requesting camera access…");
     const operation = ++operationRef.current;
     try {
@@ -82,6 +269,7 @@ export default function Home() {
       if (!track) throw new Error("No camera video track was provided.");
       const handleEnded = () => {
         if (operation !== operationRef.current) return;
+        scanHoldRef.current = null; setScanProgress(0);
         operationRef.current++; startingRef.current = false; poseRef.current = null; faceMeshIndicesRef.current = null; releaseCameraResources();
         setStarting(false); setCameraActive(false); setFaceDetected(false); setLandmarkCount(0); setMeasurements(null); setMode(null);
         setError("The camera disconnected. Reconnect it to continue."); setStatus("Camera disconnected");
@@ -103,7 +291,8 @@ export default function Home() {
         landmarker = await FaceLandmarker.createFromOptions(vision, { ...options, baseOptions: { modelAssetPath: MODEL_URL, delegate: "CPU" } });
       }
       if (operation !== operationRef.current) { landmarker.close(); return; }
-      landmarkerRef.current = landmarker; setMode(inference); setCameraActive(true); setStatus("Find a comfortable light");
+      landmarkerRef.current = landmarker; setMode(inference); setCameraActive(true); setStatus("Scan started · look straight ahead");
+      announceScanStep(scanStepRef.current);
       const overlay = canvasRef.current; const context = overlay?.getContext("2d");
       if (!overlay || !context) throw new Error("Face tracking overlay could not be initialized.");
       let lastVideoTime = -1, previousFrameTime = 0, lastMetricsUpdate = 0, hadFace = false, lostAt: number | null = null;
@@ -135,20 +324,30 @@ export default function Home() {
               const dx = (rightX - leftX) * width, dy = (rightY - leftY) * height;
               const headPose = estimateHeadRotation(results.facialTransformationMatrixes[0]);
               if (Number.isFinite(leftX + leftY + rightX + rightY)) {
-                poseRef.current = { x: values[168 * 3], y: values[168 * 3 + 1],
+                const currentPose: FacePose = { x: values[168 * 3], y: values[168 * 3 + 1],
                     depth: values[168 * 3 + 2],
                     eyeDistance: Math.hypot(dx, dy), videoWidth: width, videoHeight: height,
-                    roll: Math.atan2(dy, dx) * 180 / Math.PI, yaw: headPose?.yaw ?? 0, pitch: headPose?.pitch ?? 0,
+                    // The selfie preview is mirrored while MediaPipe tracks the
+                    // unmirrored camera frame. Convert pose angles once here so
+                    // scan labels, frame rotation, and temple visibility all use
+                    // the directions the wearer sees in the preview.
+                    roll: -(Math.atan2(dy, dx) * 180 / Math.PI),
+                    yaw: -(headPose?.yaw ?? 0),
+                    pitch: -(headPose?.pitch ?? 0),
                       confidence: estimateLandmarkConfidence(points, [
                         33,
                         263,
                         6,
                         168,
                       ]) };
+                poseRef.current = currentPose;
+                recordScanProgress(frameTime, currentPose, values);
               }
               if (!hadFace) { hadFace = true; setFaceDetected(true); setLandmarkCount(points.length); setStatus("Face tracking active"); }
               if (frameTime - lastMetricsUpdate >= 200) { lastMetricsUpdate = frameTime; setMeasurements(measureFace(points, width, height, results.facialTransformationMatrixes[0])); }
             } else {
+              scanHoldRef.current = null;
+              if (scanStepRef.current !== "complete") setScanProgress(0);
               if (hadFace) { hadFace = false; lostAt = frameTime; poseRef.current = null; setFaceDetected(false); setLandmarkCount(0); setMeasurements(null); setStatus("Looking for your face…"); }
               const timeLost = lostAt === null ? Infinity : frameTime - lostAt;
               if (timeLost < 350) drawHints([], width, height, 1 - timeLost / 350); else if (timeLost >= 350) smoothedRef.current = null;
@@ -168,17 +367,23 @@ export default function Home() {
   }
 
   function stopCamera() {
-    operationRef.current++; startingRef.current = false; poseRef.current = null; faceMeshIndicesRef.current = null; releaseCameraResources(); setStarting(false); setCameraActive(false); setFaceDetected(false); setLandmarkCount(0); setMode(null); setMeasurements(null); setError(""); setStatus("Ready when you are");
+    operationRef.current++; startingRef.current = false; scanHoldRef.current = null; setScanProgress(0); poseRef.current = null; faceMeshIndicesRef.current = null; releaseCameraResources(); setStarting(false); setCameraActive(false); setFaceDetected(false); setLandmarkCount(0); setMode(null); setMeasurements(null); setError(""); setStatus("Ready when you are");
+    if (scanCueTimerRef.current !== null) window.clearTimeout(scanCueTimerRef.current);
+    scanCueTimerRef.current = null;
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
   }
-  useEffect(() => () => { operationRef.current++; startingRef.current = false; releaseCameraResources(); }, []);
+  useEffect(() => () => {
+    operationRef.current++; startingRef.current = false; releaseCameraResources();
+    if (scanCueTimerRef.current !== null) window.clearTimeout(scanCueTimerRef.current);
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    void scanAudioContextRef.current?.close();
+    scanAudioContextRef.current = null;
+  }, []);
   useEffect(() => {
     if (!modelUrl.startsWith("blob:")) return;
     return () => URL.revokeObjectURL(modelUrl);
   }, [modelUrl]);
-  useEffect(() => {
-    if (!uploadedImage?.startsWith("blob:")) return;
-    return () => URL.revokeObjectURL(uploadedImage);
-  }, [uploadedImage]);
+
   useEffect(() => {
     if (!fullScreen) return;
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -195,33 +400,6 @@ export default function Home() {
     setRotationOffset({ pitch: 0, yaw: 0, roll: 0 });
   }
 
-  async function uploadFile(file?: File) {
-    if (!file) return;
-    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
-      setError("Choose a PNG, JPG, or WebP image.");
-      return;
-    }
-    if (file.size > 15 * 1024 * 1024) {
-      setError("Image files must be smaller than 15 MB.");
-      return;
-    }
-    try {
-      const bitmap = await createImageBitmap(file);
-      const validDimensions = bitmap.width <= 8192 && bitmap.height <= 8192;
-      bitmap.close();
-      if (!validDimensions) {
-        setError("Image dimensions must be 8192 × 8192 pixels or smaller.");
-        return;
-      }
-      resetCalibration();
-      setUploadedImage(URL.createObjectURL(file));
-      setShowUploadControls(true);
-      setError("");
-    } catch (imageError) {
-      console.error("Unable to read uploaded glasses image:", imageError);
-      setError("That image could not be read. Try another PNG, JPG, or WebP.");
-    }
-  }
   async function uploadModel(file?: File) {
     if (!file) return;
     if (!file.name.toLowerCase().endsWith(".glb")) { setError("Choose a .glb model with its textures embedded."); return; }
@@ -243,7 +421,6 @@ export default function Home() {
       return;
     }
     resetCalibration();
-    setUploadedImage(null);
     setModelUrl(URL.createObjectURL(file)); setError(""); setShowUploadControls(true);
   }
   function capture() {
@@ -259,7 +436,13 @@ export default function Home() {
   }
   const faceShape = getFaceShape(measurements);
   const frame = FRAMES[selected];
-  const customModel = modelUrl.startsWith("blob:");
+  const customModel = !FRAMES.some((item) => item.modelUrl === modelUrl);
+  const scanComplete = scanStep === "complete";
+  const scanScaleProfiles: ScanScaleProfiles = {
+    front: scanCaptures.front,
+    left: scanCaptures.left,
+    right: scanCaptures.right,
+  };
 
   return (
     <main className={fullScreen ? "studio fullscreen" : "studio"}>
@@ -298,34 +481,46 @@ export default function Home() {
         <div className="try-grid">
           <div className="camera-column">
             <div className="camera-frame">
-              <div className="camera-topline"><span><i className={cameraActive ? "live-dot active" : "live-dot"}/> {cameraActive ? "LIVE FITTING" : "YOUR PRIVATE FITTING ROOM"}</span><span>01 — 04</span></div>
+              <div className="camera-topline"><span><i className={cameraActive ? "live-dot active" : "live-dot"}/> {cameraActive ? "LIVE FITTING" : "YOUR PRIVATE FITTING ROOM"}</span><span>{String(selected + 1).padStart(2, "0")} — {String(FRAMES.length).padStart(2, "0")}</span></div>
               <div className="camera-view" id="camera-view">
                 <video ref={videoRef} autoPlay playsInline muted className="camera-video"/>
                 <canvas ref={canvasRef} className="tracking-canvas"/>
-                <Glasses3D poseRef={poseRef} landmarksRef={smoothedRef} faceMeshIndicesRef={faceMeshIndicesRef} modelUrl={modelUrl} imageUrl={uploadedImage} cameraActive={cameraActive} scale={scale} offsetY={offsetY} depthOffset={depthOffset} rotationOffset={rotationOffset} onModelStatus={setModelStatus}/>
-                {cameraActive && faceDetected && <div className="face-label"><span className="face-pulse"/> FACE TRACKING <span>·</span> HEAD POSE ACTIVE</div>}
+                <Glasses3D poseRef={poseRef} landmarksRef={smoothedRef} faceMeshIndicesRef={faceMeshIndicesRef} modelUrl={modelUrl} scanProfiles={scanScaleProfiles} cameraActive={cameraActive} scanComplete={scanComplete} scale={scale} offsetY={offsetY} depthOffset={depthOffset} rotationOffset={rotationOffset} onModelStatus={setModelStatus}/>
+                {cameraActive && faceDetected && <div className="face-label"><span className="face-pulse"/> {scanComplete ? "3D FIT ACTIVE" : "PROFILE SCAN"} <span>·</span> {scanComplete ? "HEAD POSE ACTIVE" : SCAN_COPY[scanStep].title.toUpperCase()}</div>}
                 {!cameraActive && <div className="camera-placeholder"><div className="portrait"><div className="portrait-head"><span className="portrait-hair"/><span className="portrait-neck"/></div><div className="portrait-shoulder"/></div><div className="placeholder-copy"><span className="placeholder-icon">✳</span><span>Make this space yours.</span><small>Your camera stays on this device.</small></div></div>}
                 {starting && <div className="camera-loading"><span className="spinner"/> Preparing your fitting room</div>}
                 <div className="camera-corners"><i/><i/><i/><i/></div>
                 <button className="expand-button" onClick={() => setFullScreen(!fullScreen)} aria-label={fullScreen ? "Exit full screen" : "Enter full screen"} aria-pressed={fullScreen}>{fullScreen ? "↙" : "⛶"}</button>
               </div>
-              <div className="camera-controls"><div className="control-status"><span className={faceDetected ? "status-orb detected" : "status-orb"}/><div><b>{faceDetected ? "You're in view" : status}</b><small>{faceDetected ? `${landmarkCount} facial landmarks · ${mode ?? ""} tracking` : "Center your face in the frame"}</small></div></div>
-                <div className="control-actions">{cameraActive ? <><button className="capture-button" onClick={capture} aria-label="Capture photograph">◎</button><button className="camera-button stop-button" onClick={stopCamera}>End session <span>×</span></button></> : <button className="camera-button" onClick={startCamera} disabled={starting}>{starting ? "Preparing…" : "Start your fitting"}<span>↗</span></button>}</div>
+              <div className="camera-controls"><div className="control-status"><span className={faceDetected ? "status-orb detected" : "status-orb"}/><div><b>{faceDetected ? "You're in view" : status}</b><small>{faceDetected ? `${landmarkCount} facial landmarks · ${mode ?? ""} tracking` : scanComplete ? "Start camera for live fitting" : "Camera scan is required before frame selection"}</small></div></div>
+                <div className="control-actions">{cameraActive ? <>{scanComplete && <button className="capture-button" onClick={capture} aria-label="Capture photograph">◎</button>}<button className="camera-button stop-button" onClick={stopCamera}>End session <span>×</span></button></> : <button className="camera-button" onClick={startCamera} disabled={starting}>{starting ? "Preparing…" : scanComplete ? "Start your fitting" : "Start 3 view scan"}<span>↗</span></button>}</div>
               </div>
+            </div>
+            <div className={`profile-scan ${scanComplete ? "is-complete" : ""}`}>
+              <div className="profile-scan-heading">
+                <div><span className="scan-kicker">PERSONAL FIT SETUP</span><b>{SCAN_COPY[scanStep].title}</b></div>
+                <div className="profile-scan-actions">
+                  <button className="scan-audio-toggle" type="button" onClick={toggleAudioGuidance} aria-pressed={audioGuidance} aria-label={`Turn sound prompts ${audioGuidance ? "off" : "on"}`}><span aria-hidden="true">{audioGuidance ? "◖))" : "◖×"}</span>Sound {audioGuidance ? "on" : "off"}</button>
+                  {scanComplete ? <button type="button" onClick={restartScan}>Rescan profiles ↻</button> : <span>{SCAN_STEPS.indexOf(scanStep as Exclude<ScanStep, "complete">) + 1} / 3</span>}
+                </div>
+              </div>
+              <p>{scanComplete ? "Front and side views captured. Choose your frame to begin the try-on." : cameraActive ? `${SCAN_COPY[scanStep].instruction}${audioGuidance ? " Listen for the spoken direction and confirmation tone." : ""}` : "Start the camera to scan front, left, and right views before selecting a frame."}</p>
+              {!scanComplete && <div className="scan-progress-track"><div style={{ width: `${scanProgress}%` }}/></div>}
+              <div className="scan-step-list">{SCAN_STEPS.map((step) => <span key={step} className={scanCaptures[step] ? "captured" : step === scanStep ? "current" : ""}><i>{scanCaptures[step] ? "✓" : step === scanStep ? "•" : "○"}</i>{step}</span>)}</div>
             </div>
             {error && <p role="alert" className="error-message">{error}</p>}
             <div className="privacy-note"><span>◈</span> Your camera is processed on this device. No images are uploaded or stored.</div>
           </div>
           <aside className="selection-panel">
-            <div className="selection-top"><div><p className="eyebrow">YOUR FRAME</p><h3>{uploadedImage ? "2D reference image" : customModel ? "Uploaded GLB model" : frame.name}</h3><p className="frame-style">{uploadedImage ? "Frontal image · no hidden depth" : customModel ? "Custom 3D model · calibrate fit" : frame.style}</p></div><span className="frame-price">{uploadedImage || customModel ? "—" : frame.price}</span></div>
-            <div className="selected-swatch">{!uploadedImage && !customModel && frame.image ? <div className="real-frame-swatch" style={{ backgroundImage: `url("${frame.image}")` }} role="img" aria-label={frame.name}/> : <div className="swatch-art" style={{ "--frame-tone": uploadedImage ? "#9d795b" : frame.color } as React.CSSProperties}><span/><i/><b/><em/></div>}<span>{uploadedImage ? "CUSTOM IMAGE" : customModel ? "CUSTOM GLB" : frame.shape.toUpperCase()} <span>·</span> {customModel || uploadedImage ? "LOCAL PREVIEW" : "HAND-FINISHED"}</span></div>
+            <div className="selection-top"><div><p className="eyebrow">YOUR FRAME</p><h3>{customModel ? "Uploaded GLB model" : frame.name}</h3><p className="frame-style">{customModel ? "Local 3D model · calibrate fit" : frame.style}</p></div><span className="frame-price">GLB</span></div>
+            <div className="selected-swatch"><div className="swatch-art" style={{ "--frame-tone": frame.color } as React.CSSProperties}><span/><i/><b/><em/></div><span>{customModel ? "CUSTOM GLB" : frame.shape.toUpperCase()} <span>·</span> REAL 3D MODEL</span></div>
             <div className="panel-rule"/>
-            <div className="choose-title"><span>EXPLORE THE COLLECTION</span><span>0{selected + 1} / 04</span></div>
-            <div className="frame-options">{FRAMES.map((item, i) => <button key={item.name} className={`frame-option ${selected === i && !uploadedImage ? "selected" : ""}`} onClick={() => { setSelected(i); setUploadedImage(null); setModelUrl(DEFAULT_MODEL_URL); resetCalibration(); }} aria-label={`Select ${item.name}`}><span className="option-number">0{i + 1}</span><span className="option-mini" style={{ "--frame-tone": item.color } as React.CSSProperties}><i/><b/></span><span className="option-name">{item.name}</span><span className="option-check">{selected === i && !uploadedImage ? "✓" : "↗"}</span></button>)}</div>
-            <div className="upload-row"><button onClick={() => fileRef.current?.click()}><span>＋</span> Add PNG / image</button><input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { void uploadFile(event.target.files?.[0]); event.currentTarget.value = ""; }}/><button onClick={() => modelFileRef.current?.click()}><span>＋</span> Add GLB model</button><input ref={modelFileRef} type="file" accept=".glb,model/gltf-binary" hidden onChange={(event) => { void uploadModel(event.target.files?.[0]); event.currentTarget.value = ""; }}/>{uploadedImage && <button className="clear-upload" onClick={() => { setUploadedImage(null); setModelUrl(DEFAULT_MODEL_URL); resetCalibration(); }}>Clear ×</button>}<button className="calibrate-toggle" onClick={() => setShowUploadControls(!showUploadControls)}>Adjust</button></div>
-            {showUploadControls && <div className="calibration"><label>Scale <input type="range" min=".6" max="1.5" step=".01" value={scale} onChange={(e) => setScale(Number(e.target.value))}/></label><label>Vertical position <input type="range" min="-50" max="50" value={offsetY} onChange={(e) => setOffsetY(Number(e.target.value))}/></label>{!uploadedImage && <><label>Bridge depth <input type="range" min="-80" max="80" value={depthOffset} onChange={(e) => setDepthOffset(Number(e.target.value))}/></label><label>Yaw alignment <input type="range" min="-180" max="180" value={rotationOffset.yaw} onChange={(e) => setRotationOffset({ ...rotationOffset, yaw: Number(e.target.value) })}/></label><label>Pitch alignment <input type="range" min="-90" max="90" value={rotationOffset.pitch} onChange={(e) => setRotationOffset({ ...rotationOffset, pitch: Number(e.target.value) })}/></label></>}<label>Roll alignment <input type="range" min="-45" max="45" value={rotationOffset.roll} onChange={(e) => setRotationOffset({ ...rotationOffset, roll: Number(e.target.value) })}/></label><p>{uploadedImage ? "2D alignment only · image depth is unavailable" : "3D calibration · normalized model width and bridge depth"}</p></div>}
-            {uploadedImage && <p className="asset-limit-note">A flat image can only approximate a frontal view. It fades as you turn; it has no real depth, temples, or side geometry. Use a GLB model for multi-angle fitting.</p>}
-            {!uploadedImage && !customModel && selected > 0 && <p className="asset-limit-note">The included starter GLB is used for this fitting preview until a product-specific model is supplied.</p>}
+            {!scanComplete && <div className="scan-lock-note">Complete all three profile scans to unlock the frames.</div>}
+            <div className="choose-title"><span>EXPLORE THE COLLECTION</span><span>{String(selected + 1).padStart(2, "0")} / {String(FRAMES.length).padStart(2, "0")}</span></div>
+            <div className={`frame-options ${!scanComplete ? "locked" : ""}`}>{FRAMES.map((item, i) => <button key={item.name} disabled={!scanComplete} className={`frame-option ${selected === i && !customModel ? "selected" : ""}`} onClick={() => { setSelected(i); setModelUrl(item.modelUrl); resetCalibration(); }} aria-label={`Select ${item.name}`}><span className="option-number">0{i + 1}</span><span className="option-mini" style={{ "--frame-tone": item.color } as React.CSSProperties}><i/><b/></span><span className="option-name">{item.name}</span><span className="option-check">{selected === i && !customModel ? "✓" : "↗"}</span></button>)}</div>
+            <div className={`upload-row ${!scanComplete ? "locked" : ""}`}><button disabled={!scanComplete} onClick={() => modelFileRef.current?.click()}><span>＋</span> Load GLB model</button><input ref={modelFileRef} type="file" accept=".glb,model/gltf-binary" hidden onChange={(event) => { void uploadModel(event.target.files?.[0]); event.currentTarget.value = ""; }}/>{customModel && <button className="clear-upload" onClick={() => { setModelUrl(frame.modelUrl); resetCalibration(); }}>Use selected frame</button>}<button disabled={!scanComplete} className="calibrate-toggle" onClick={() => setShowUploadControls(!showUploadControls)}>Adjust fit</button></div>
+            {showUploadControls && <div className="calibration"><label>Scale <input type="range" min=".6" max="1.5" step=".01" value={scale} onChange={(e) => setScale(Number(e.target.value))}/></label><label>Vertical position <input type="range" min="-50" max="50" value={offsetY} onChange={(e) => setOffsetY(Number(e.target.value))}/></label><label>Bridge depth <input type="range" min="-80" max="80" value={depthOffset} onChange={(e) => setDepthOffset(Number(e.target.value))}/></label><label>Yaw alignment <input type="range" min="-180" max="180" value={rotationOffset.yaw} onChange={(e) => setRotationOffset({ ...rotationOffset, yaw: Number(e.target.value) })}/></label><label>Pitch alignment <input type="range" min="-90" max="90" value={rotationOffset.pitch} onChange={(e) => setRotationOffset({ ...rotationOffset, pitch: Number(e.target.value) })}/></label><label>Roll alignment <input type="range" min="-45" max="45" value={rotationOffset.roll} onChange={(e) => setRotationOffset({ ...rotationOffset, roll: Number(e.target.value) })}/></label><p>3D calibration · GLB dimensions, bridge depth, yaw, pitch, and roll</p></div>}
+
             <p className="model-status">◈ {modelStatus}</p>
             <div className="analysis-card"><div className="analysis-title"><span>YOUR STYLE NOTES</span><button onClick={() => setShowAnalysis(!showAnalysis)}>{showAnalysis ? "−" : "+"}</button></div>{showAnalysis && <><div className="analysis-shape"><span className="shape-icon">◯</span><div><small>ESTIMATED FACE SHAPE</small><b>{faceShape.label}</b></div><span className="confidence">STYLE GUIDE</span></div><p className="recommendation">{faceShape.copy}</p>{measurements && <div className="ratio-row"><span>FACE WIDTH / HEIGHT</span><b>{measurements.faceHeight > 0 ? (measurements.faceWidth / measurements.faceHeight).toFixed(2) : "—"}</b></div>}<p className="approx-note">Approximate style guidance from facial proportions, not a biometric or medical assessment.</p></>}</div>
             <div className="fit-tip"><span>✳</span><p><b>A good fit should feel effortless.</b><br/>We’ll help you find your shape, your way.</p></div>
@@ -333,7 +528,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="collection-section" id="collection"><div className="collection-head"><div><p className="eyebrow"><span className="eyebrow-line"/> MADE TO BE YOURS</p><h2>Considered shapes.<br/><em>Everyday icons.</em></h2></div><a href="#try-on" className="text-link">Explore all frames <span>↗</span></a></div><div className="product-grid">{FRAMES.slice(0, 3).map((item, index) => <button className="product-card" key={item.name} onClick={() => { setSelected(index); setUploadedImage(null); setModelUrl(DEFAULT_MODEL_URL); resetCalibration(); document.getElementById("try-on")?.scrollIntoView({ behavior: "smooth" }); }}><span className={`product-art art-${index} ${item.image ? "product-with-image" : ""}`}>{item.image ? <span className="product-image" style={{ backgroundImage: `url("${item.image}")` }} role="img" aria-label={item.name}/> : <><span className="product-lens left"/><span className="product-lens right"/><span className="product-bridge"/><span className="product-temple left"/><span className="product-temple right"/></>}<span className="product-number">0{index + 1}</span><span className="product-annotation">FORMA<br/>STUDIO</span></span><span className="product-meta"><span><b>{item.name}</b><small>{item.style}</small></span><b>{item.price}</b></span></button>)}</div></section>
+      <section className="collection-section" id="collection"><div className="collection-head"><div><p className="eyebrow"><span className="eyebrow-line"/> {FRAMES.length} GLB FRAMES</p><h2>Choose a frame.<br/><em>Then see it on you.</em></h2></div><a href="#try-on" className="text-link">Open fitting room <span>↗</span></a></div><div className="product-grid">{FRAMES.map((item, index) => <button disabled={!scanComplete} className="product-card" key={item.modelUrl} onClick={() => { setSelected(index); setModelUrl(item.modelUrl); resetCalibration(); document.getElementById("try-on")?.scrollIntoView({ behavior: "smooth" }); }}><span className={`product-art art-${index} product-${item.shape.toLowerCase()}`}><GlbProductPreview src={item.modelUrl} label={item.name}/><span className="product-number">{String(index + 1).padStart(2, "0")}</span><span className="product-annotation">3D MODEL</span></span><span className="product-meta"><span><b>{item.name}</b><small>{item.style}</small></span><b>Try on ↗</b></span></button>)}</div></section>
       <section className="manifesto" id="about"><div className="manifesto-mark">f.</div><p>Good design should feel<br/>like <em>it was always yours.</em></p><span>DESIGNED WITH INTENTION · WORN YOUR WAY</span></section>
       <footer className="site-footer"><a className="wordmark" href="#top">forma<span>®</span></a><span>OBJECTS FOR THE WAY YOU SEE.</span><span>© FORMA STUDIO 2025</span></footer>
       {captured && <div className="capture-modal" role="dialog" aria-modal="true" aria-label="Your fitting photo"><div className="capture-card"><button className="modal-close" onClick={() => setCaptured(null)}>×</button><div className="capture-image" role="img" aria-label="Your fitting room photo" style={{ backgroundImage: `url("${captured}")` }}/><div><b>Your moment, your device.</b><span>This preview has not been uploaded.</span><a href={captured} download="forma-fitting.jpg">Save photo ↗</a></div></div></div>}
